@@ -6,7 +6,6 @@ package syslog
 import "C"
 import (
 	"fmt"
-	"sync"
 	"unsafe"
 )
 
@@ -64,31 +63,58 @@ const (
 	LOG_PERROR Option = 0x20
 )
 
-var mu sync.RWMutex
+type internal_log struct {
+	p   Priority
+	msg string
+	end bool
+}
+
+var log_buff chan internal_log
+var doLog bool
+
+// A dedicated async log routine so the logging will be asynchonied via the APP
+func run_log() {
+	var log_msg internal_log
+	test := true
+	for test == true {
+		log_msg = <-log_buff
+		if !log_msg.end {
+			write_to_syslog(log_msg)
+		} else {
+			break
+		}
+	}
+	close(log_buff)
+	C.closelog()
+}
+
+// Actual syslog writer function this will call the C code
+func write_to_syslog(log internal_log) {
+	message := C.CString(log.msg)
+	C.go_syslog(C.int(log.p), message)
+	C.free(unsafe.Pointer(message))
+}
 
 // Opens or reopens a connection to Syslog in preparation for submitting messages.
 // See http://www.gnu.org/software/libc/manual/html_node/openlog.html
 // for parameters description
 func Openlog(ident string, o Option, p Priority) {
 	cs := C.CString(ident)
-
-	mu.Lock()
-	defer mu.Unlock()
 	C.go_openlog(cs, C.int(o), C.int(p))
 	C.free(unsafe.Pointer(cs))
+	log_buff = make(chan internal_log)
+	doLog = true
+	go run_log()
 }
 
 // Writes msg to syslog with facility and priority indicated by parameter "p"
 // You can combine facility and priority with bitwise or operator, e.g. :
 // syslog.Syslog( syslog.LOG_INFO | syslog.LOG_USER, "Hello syslog")
 func Syslog(p Priority, msg string) {
-	message := C.CString(msg)
-
-	mu.RLock()
-	defer mu.RUnlock()
-
-	C.go_syslog(C.int(p), message)
-	C.free(unsafe.Pointer(message))
+	if doLog {
+		log := internal_log{p: p, msg: msg, end: false}
+		log_buff <- log
+	}
 }
 
 // Formats according to a format specifier and writes to syslog with
@@ -101,7 +127,9 @@ func Syslogf(p Priority, format string, a ...interface{}) {
 // This includes closing the /dev/log socket, if it is open.
 // Closelog also sets the identification string for Syslog messages back to the default,
 func Closelog() {
-	C.closelog()
+	doLog = false
+	log := internal_log{p: 0, msg: "", end: true}
+	log_buff <- log
 }
 
 func setlogmask(logmask int) int {
