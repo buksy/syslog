@@ -1,5 +1,7 @@
 package syslog
 
+//Wrap syslog function
+
 // Writes syslog message with log level EMERG
 func Emerg(msg string) {
 	Syslog(LOG_EMERG, msg)
